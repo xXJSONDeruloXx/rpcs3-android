@@ -6,14 +6,43 @@
     android:layout_height="match_parent"
     tools:context=".MainActivity">
 
-    <TextView
-        android:id="@+id/sample_text"
+    <LinearLayout
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:text="Hello World!"
+        android:layout_marginStart="96dp"
+        android:layout_marginTop="96dp"
+        android:layout_marginEnd="96dp"
+        android:layout_marginBottom="196dp"
+        android:orientation="vertical"
         app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toTopOf="parent" />
+        app:layout_constraintTop_toTopOf="parent">
+
+        <Button
+            android:id="@+id/boot_game"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Boot Game" />
+
+        <Button
+            android:id="@+id/install_game"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Install Game" />
+
+        <Button
+            android:id="@+id/install_fw"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Install FW" />
+
+        <Button
+            android:id="@+id/run_sample"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Run Sample" />
+
+    </LinearLayout>
 
 </androidx.constraintlayout.widget.ConstraintLayout>

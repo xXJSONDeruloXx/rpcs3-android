@@ -3,6 +3,8 @@ project("rpcs3-android")
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_POSITION_INDEPENDENT_CODE on)
+# set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mno-avx")
+
 
 set(FFMPEG_PATH ${CMAKE_CURRENT_SOURCE_DIR}/FFmpeg)
 add_custom_command(
