@@ -3,15 +3,15 @@ package net.rpcs3
 import android.view.Surface
 
 class RPCS3 {
-    external fun initialize(apkDir: String, dataDir: String, storageDir: String, externalStorageDir: String, rootDir: String): Boolean;
-
-    external fun installFw(fd: Int, eventHandler: Any, requestId: Long): Boolean;
-    external fun installPkgFile(fd: Int, eventHandler: Any, requestId: Long): Boolean;
-    external fun boot(surface: Surface, path: String): Boolean;
-    //    external fun shutdown(): Void;
+    external fun initialize(rootDir: String): Boolean
+    external fun installFw(fd: Int, progressId: Long): Boolean
+    external fun installPkgFile(fd: Int, progressId: Long): Boolean
+    external fun boot(path: String): Boolean
+    external fun surfaceEvent(surface: Surface, event: Int): Boolean
 
     companion object {
-        var instance = RPCS3();
+        val instance = RPCS3()
+        var rootDirectory: String = ""
 
         init {
             System.loadLibrary("rpcs3-android")

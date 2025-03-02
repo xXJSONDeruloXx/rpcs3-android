@@ -14,8 +14,10 @@
 #include "Emu/localized_string_id.h"
 #include "Emu/system_config.h"
 #include "Emu/system_config_types.h"
+#include "Emu/system_utils.hpp"
 #include "Emu/vfs_config.h"
 #include "Input/pad_thread.h"
+#include "Loader/PSF.h"
 #include "Loader/PUP.h"
 #include "Loader/TAR.h"
 #include "Utilities/File.h"
@@ -43,9 +45,12 @@
 #include <functional>
 #include <iterator>
 #include <jni.h>
+#include <optional>
+#include <span>
 #include <string>
 #include <sys/resource.h>
 #include <thread>
+#include <vector>
 
 struct AtExit {
   std::function<void()> cb;
@@ -53,7 +58,7 @@ struct AtExit {
 };
 
 static bool g_initialized;
-static ANativeWindow *g_native_window;
+static std::atomic<ANativeWindow *> g_native_window;
 
 extern std::string g_android_executable_dir;
 extern std::string g_android_config_dir;
@@ -97,12 +102,13 @@ struct LogListener : logs::listener {
 } static g_androidLogListener;
 
 struct GraphicsFrame : GSFrameBase {
-  ANativeWindow *native_window;
-  explicit GraphicsFrame(ANativeWindow *native_window)
-      : native_window(native_window) {
-    ANativeWindow_acquire(native_window);
+  static ANativeWindow *getNativeWindow() {
+    ANativeWindow *result;
+    while ((result = g_native_window.load()) == nullptr) [[unlikely]] {
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    return result;
   }
-  ~GraphicsFrame() { ANativeWindow_release(native_window); }
   void close() override {}
   void reset() override {}
   bool shown() override { return true; }
@@ -114,16 +120,19 @@ struct GraphicsFrame : GSFrameBase {
   draw_context_t make_context() override { return nullptr; }
   void set_current(draw_context_t ctx) override {}
   void flip(draw_context_t ctx, bool skip_frame = false) override {}
-  int client_width() override { return ANativeWindow_getWidth(native_window); }
+  int client_width() override {
+    return ANativeWindow_getWidth(getNativeWindow());
+  }
   int client_height() override {
-    return ANativeWindow_getHeight(native_window);
+    return ANativeWindow_getHeight(getNativeWindow());
   }
   f64 client_display_rate() override { return 30.f; }
   bool has_alpha() override {
-    return ANativeWindow_getFormat(native_window) == WINDOW_FORMAT_RGBA_8888;
+    return ANativeWindow_getFormat(getNativeWindow()) ==
+           WINDOW_FORMAT_RGBA_8888;
   }
 
-  display_handle_t handle() const override { return native_window; }
+  display_handle_t handle() const override { return getNativeWindow(); }
 
   bool can_consume_frame() const override { return false; }
 
@@ -225,168 +234,276 @@ static std::pair<std::string, std::u32string> g_strings[] = {
     MAKE_STRING(RSX_OVERLAYS_OSK_DIALOG_ENTER_TEXT, "[Enter Text]"),
     MAKE_STRING(RSX_OVERLAYS_OSK_DIALOG_ENTER_PASSWORD, "[Enter Password]"),
     MAKE_STRING(RSX_OVERLAYS_MEDIA_DIALOG_TITLE, "Select media"),
-    MAKE_STRING(RSX_OVERLAYS_MEDIA_DIALOG_TITLE_PHOTO_IMPORT, "Select photo to import"),
+    MAKE_STRING(RSX_OVERLAYS_MEDIA_DIALOG_TITLE_PHOTO_IMPORT,
+                "Select photo to import"),
     MAKE_STRING(RSX_OVERLAYS_MEDIA_DIALOG_EMPTY, "No media found."),
     MAKE_STRING(RSX_OVERLAYS_LIST_SELECT, "Enter"),
     MAKE_STRING(RSX_OVERLAYS_LIST_CANCEL, "Back"),
     MAKE_STRING(RSX_OVERLAYS_LIST_DENY, "Deny"),
     MAKE_STRING(CELL_OSK_DIALOG_TITLE, "On Screen Keyboard"),
-		MAKE_STRING(CELL_OSK_DIALOG_BUSY, "The Home Menu can't be opened while the On Screen Keyboard is busy!"),
-		MAKE_STRING(CELL_SAVEDATA_CB_BROKEN, "Error - Save data corrupted"),
-		MAKE_STRING(CELL_SAVEDATA_CB_FAILURE, "Error - Failed to save or load"),
-		MAKE_STRING(CELL_SAVEDATA_CB_NO_DATA, "Error - Save data cannot be found"),
-		MAKE_STRING(CELL_SAVEDATA_NO_DATA, "There is no saved data."),
-		MAKE_STRING(CELL_SAVEDATA_NEW_SAVED_DATA_TITLE, "New Saved Data"),
-		MAKE_STRING(CELL_SAVEDATA_NEW_SAVED_DATA_SUB_TITLE, "Select to create a new entry"),
-		MAKE_STRING(CELL_SAVEDATA_SAVE_CONFIRMATION, "Do you want to save this data?"),
-		MAKE_STRING(CELL_SAVEDATA_AUTOSAVE, "Saving..."),
-		MAKE_STRING(CELL_SAVEDATA_AUTOLOAD, "Loading..."),
-		MAKE_STRING(CELL_CROSS_CONTROLLER_FW_MSG, "If your system software version on the PS Vita system is earlier than 1.80, you must update the system software to the latest version."),
-		MAKE_STRING(CELL_NP_RECVMESSAGE_DIALOG_TITLE, "Select Message"),
-		MAKE_STRING(CELL_NP_RECVMESSAGE_DIALOG_TITLE_INVITE, "Select Invite"),
-		MAKE_STRING(CELL_NP_RECVMESSAGE_DIALOG_TITLE_ADD_FRIEND, "Add Friend"),
-		MAKE_STRING(CELL_NP_RECVMESSAGE_DIALOG_FROM, "From:"),
-		MAKE_STRING(CELL_NP_RECVMESSAGE_DIALOG_SUBJECT, "Subject:"),
-		MAKE_STRING(CELL_NP_SENDMESSAGE_DIALOG_TITLE, "Select Message To Send"),
-		MAKE_STRING(CELL_NP_SENDMESSAGE_DIALOG_TITLE_INVITE, "Send Invite"),
-		MAKE_STRING(CELL_NP_SENDMESSAGE_DIALOG_TITLE_ADD_FRIEND, "Add Friend"),
-		MAKE_STRING(RECORDING_ABORTED, "Recording aborted!"),
-		MAKE_STRING(RPCN_NO_ERROR, "RPCN: No Error"),
-		MAKE_STRING(RPCN_ERROR_INVALID_INPUT, "RPCN: Invalid Input (Wrong Host/Port)"),
-		MAKE_STRING(RPCN_ERROR_WOLFSSL, "RPCN Connection Error: WolfSSL Error"),
-		MAKE_STRING(RPCN_ERROR_RESOLVE, "RPCN Connection Error: Resolve Error"),
-		MAKE_STRING(RPCN_ERROR_CONNECT, "RPCN Connection Error"),
-		MAKE_STRING(RPCN_ERROR_LOGIN_ERROR, "RPCN Login Error: Identification Error"),
-		MAKE_STRING(RPCN_ERROR_ALREADY_LOGGED, "RPCN Login Error: User Already Logged In"),
-		MAKE_STRING(RPCN_ERROR_INVALID_LOGIN, "RPCN Login Error: Invalid Username"),
-		MAKE_STRING(RPCN_ERROR_INVALID_PASSWORD, "RPCN Login Error: Invalid Password"),
-		MAKE_STRING(RPCN_ERROR_INVALID_TOKEN, "RPCN Login Error: Invalid Token"),
-		MAKE_STRING(RPCN_ERROR_INVALID_PROTOCOL_VERSION, "RPCN Misc Error: Protocol Version Error (outdated RPCS3?)"),
-		MAKE_STRING(RPCN_ERROR_UNKNOWN, "RPCN: Unknown Error"),
-		MAKE_STRING(RPCN_SUCCESS_LOGGED_ON, "Successfully logged on RPCN!"),
-		MAKE_STRING(HOME_MENU_TITLE, "Home Menu"),
-		MAKE_STRING(HOME_MENU_EXIT_GAME, "Exit Game"),
-		MAKE_STRING(HOME_MENU_RESUME, "Resume Game"),
-		MAKE_STRING(HOME_MENU_FRIENDS, "Friends"),
-		MAKE_STRING(HOME_MENU_FRIENDS_REQUESTS, "Pending Friend Requests"),
-		MAKE_STRING(HOME_MENU_FRIENDS_BLOCKED, "Blocked Users"),
-		MAKE_STRING(HOME_MENU_FRIENDS_STATUS_ONLINE, "Online"),
-		MAKE_STRING(HOME_MENU_FRIENDS_STATUS_OFFLINE, "Offline"),
-		MAKE_STRING(HOME_MENU_FRIENDS_STATUS_BLOCKED, "Blocked"),
-		MAKE_STRING(HOME_MENU_FRIENDS_REQUEST_SENT, "You sent a friend request"),
-		MAKE_STRING(HOME_MENU_FRIENDS_REQUEST_RECEIVED, "Sent you a friend request"),
-		MAKE_STRING(HOME_MENU_FRIENDS_REJECT_REQUEST, "Reject Request"),
-		MAKE_STRING(HOME_MENU_FRIENDS_NEXT_LIST, "Next list"),
-		MAKE_STRING(HOME_MENU_RESTART, "Restart Game"),
-		MAKE_STRING(HOME_MENU_SETTINGS, "Settings"),
-		MAKE_STRING(HOME_MENU_SETTINGS_SAVE, "Save custom configuration?"),
-		MAKE_STRING(HOME_MENU_SETTINGS_SAVE_BUTTON, "Save"),
-		MAKE_STRING(HOME_MENU_SETTINGS_DISCARD, "Discard the current settings' changes?"),
-		MAKE_STRING(HOME_MENU_SETTINGS_DISCARD_BUTTON, "Discard"),
-		MAKE_STRING(HOME_MENU_SETTINGS_AUDIO, "Audio"),
-		MAKE_STRING(HOME_MENU_SETTINGS_AUDIO_MASTER_VOLUME, "Master Volume"),
-		MAKE_STRING(HOME_MENU_SETTINGS_AUDIO_BACKEND, "Audio Backend"),
-		MAKE_STRING(HOME_MENU_SETTINGS_AUDIO_BUFFERING, "Enable Buffering"),
-		MAKE_STRING(HOME_MENU_SETTINGS_AUDIO_BUFFER_DURATION, "Desired Audio Buffer Duration"),
-		MAKE_STRING(HOME_MENU_SETTINGS_AUDIO_TIME_STRETCHING, "Enable Time Stretching"),
-		MAKE_STRING(HOME_MENU_SETTINGS_AUDIO_TIME_STRETCHING_THRESHOLD, "Time Stretching Threshold"),
-		MAKE_STRING(HOME_MENU_SETTINGS_VIDEO, "Video"),
-		MAKE_STRING(HOME_MENU_SETTINGS_VIDEO_FRAME_LIMIT, "Frame Limit"),
-		MAKE_STRING(HOME_MENU_SETTINGS_VIDEO_ANISOTROPIC_OVERRIDE, "Anisotropic Filter Override"),
-		MAKE_STRING(HOME_MENU_SETTINGS_VIDEO_OUTPUT_SCALING, "Output Scaling"),
-		MAKE_STRING(HOME_MENU_SETTINGS_VIDEO_RCAS_SHARPENING, "FidelityFX CAS Sharpening Intensity"),
-		MAKE_STRING(HOME_MENU_SETTINGS_VIDEO_STRETCH_TO_DISPLAY, "Stretch To Display Area"),
-		MAKE_STRING(HOME_MENU_SETTINGS_INPUT, "Input"),
-		MAKE_STRING(HOME_MENU_SETTINGS_INPUT_BACKGROUND_INPUT, "Background Input Enabled"),
-		MAKE_STRING(HOME_MENU_SETTINGS_INPUT_KEEP_PADS_CONNECTED, "Keep Pads Connected"),
-		MAKE_STRING(HOME_MENU_SETTINGS_INPUT_SHOW_PS_MOVE_CURSOR, "Show PS Move Cursor"),
-		MAKE_STRING(HOME_MENU_SETTINGS_INPUT_CAMERA_FLIP, "Camera Flip"),
-		MAKE_STRING(HOME_MENU_SETTINGS_INPUT_PAD_MODE, "Pad Handler Mode"),
-		MAKE_STRING(HOME_MENU_SETTINGS_INPUT_PAD_SLEEP, "Pad Handler Sleep"),
-		MAKE_STRING(HOME_MENU_SETTINGS_INPUT_FAKE_MOVE_ROTATION_CONE_H, "Fake PS Move Rotation Cone (Horizontal)"),
-		MAKE_STRING(HOME_MENU_SETTINGS_INPUT_FAKE_MOVE_ROTATION_CONE_V, "Fake PS Move Rotation Cone (Vertical)"),
-		MAKE_STRING(HOME_MENU_SETTINGS_ADVANCED, "Advanced"),
-		MAKE_STRING(HOME_MENU_SETTINGS_ADVANCED_PREFERRED_SPU_THREADS, "Preferred SPU Threads"),
-		MAKE_STRING(HOME_MENU_SETTINGS_ADVANCED_MAX_CPU_PREEMPTIONS, "Max Power Saving CPU-Preemptions"),
-		MAKE_STRING(HOME_MENU_SETTINGS_ADVANCED_ACCURATE_RSX_RESERVATION_ACCESS, "Accurate RSX reservation access"),
-		MAKE_STRING(HOME_MENU_SETTINGS_ADVANCED_SLEEP_TIMERS_ACCURACY, "Sleep Timers Accuracy"),
-		MAKE_STRING(HOME_MENU_SETTINGS_ADVANCED_MAX_SPURS_THREADS, "Max SPURS Threads"),
-		MAKE_STRING(HOME_MENU_SETTINGS_ADVANCED_DRIVER_WAKE_UP_DELAY, "Driver Wake-Up Delay"),
-		MAKE_STRING(HOME_MENU_SETTINGS_ADVANCED_VBLANK_FREQUENCY, "VBlank Frequency"),
-		MAKE_STRING(HOME_MENU_SETTINGS_ADVANCED_VBLANK_NTSC, "VBlank NTSC Fixup"),
-		MAKE_STRING(HOME_MENU_SETTINGS_OVERLAYS, "Overlays"),
-		MAKE_STRING(HOME_MENU_SETTINGS_OVERLAYS_SHOW_TROPHY_POPUPS, "Show Trophy Popups"),
-		MAKE_STRING(HOME_MENU_SETTINGS_OVERLAYS_SHOW_RPCN_POPUPS, "Show RPCN Popups"),
-		MAKE_STRING(HOME_MENU_SETTINGS_OVERLAYS_SHOW_SHADER_COMPILATION_HINT, "Show Shader Compilation Hint"),
-		MAKE_STRING(HOME_MENU_SETTINGS_OVERLAYS_SHOW_PPU_COMPILATION_HINT, "Show PPU Compilation Hint"),
-		MAKE_STRING(HOME_MENU_SETTINGS_OVERLAYS_SHOW_AUTO_SAVE_LOAD_HINT, "Show Autosave/Autoload Hint"),
-		MAKE_STRING(HOME_MENU_SETTINGS_OVERLAYS_SHOW_PRESSURE_INTENSITY_TOGGLE_HINT, "Show Pressure Intensity Toggle Hint"),
-		MAKE_STRING(HOME_MENU_SETTINGS_OVERLAYS_SHOW_ANALOG_LIMITER_TOGGLE_HINT,  "Show Analog Limiter Toggle Hint"),
-		MAKE_STRING(HOME_MENU_SETTINGS_OVERLAYS_SHOW_MOUSE_AND_KB_TOGGLE_HINT, "Show Mouse And Keyboard Toggle Hint"),
-		MAKE_STRING(HOME_MENU_SETTINGS_PERFORMANCE_OVERLAY, "Performance Overlay"),
-		MAKE_STRING(HOME_MENU_SETTINGS_PERFORMANCE_OVERLAY_ENABLE, "Enable Performance Overlay"),
-		MAKE_STRING(HOME_MENU_SETTINGS_PERFORMANCE_OVERLAY_ENABLE_FRAMERATE_GRAPH, "Enable Framerate Graph"),
-		MAKE_STRING(HOME_MENU_SETTINGS_PERFORMANCE_OVERLAY_ENABLE_FRAMETIME_GRAPH, "Enable Frametime Graph"),
-		MAKE_STRING(HOME_MENU_SETTINGS_PERFORMANCE_OVERLAY_DETAIL_LEVEL, "Detail level"),
-		MAKE_STRING(HOME_MENU_SETTINGS_PERFORMANCE_OVERLAY_FRAMERATE_DETAIL_LEVEL, "Framerate Graph Detail Level"),
-		MAKE_STRING(HOME_MENU_SETTINGS_PERFORMANCE_OVERLAY_FRAMETIME_DETAIL_LEVEL, "Frametime Graph Detail Level"),
-		MAKE_STRING(HOME_MENU_SETTINGS_PERFORMANCE_OVERLAY_FRAMERATE_DATAPOINT_COUNT, "Framerate Datapoints"),
-		MAKE_STRING(HOME_MENU_SETTINGS_PERFORMANCE_OVERLAY_FRAMETIME_DATAPOINT_COUNT, "Frametime Datapoints"),
-		MAKE_STRING(HOME_MENU_SETTINGS_PERFORMANCE_OVERLAY_UPDATE_INTERVAL, "Metrics Update Interval"),
-		MAKE_STRING(HOME_MENU_SETTINGS_PERFORMANCE_OVERLAY_POSITION, "Position"),
-		MAKE_STRING(HOME_MENU_SETTINGS_PERFORMANCE_OVERLAY_CENTER_X, "Center Horizontally"),
-		MAKE_STRING(HOME_MENU_SETTINGS_PERFORMANCE_OVERLAY_CENTER_Y, "Center Vertically"),
-		MAKE_STRING(HOME_MENU_SETTINGS_PERFORMANCE_OVERLAY_MARGIN_X, "Horizontal Margin"),
-		MAKE_STRING(HOME_MENU_SETTINGS_PERFORMANCE_OVERLAY_MARGIN_Y, "Vertical Margin"),
-		MAKE_STRING(HOME_MENU_SETTINGS_PERFORMANCE_OVERLAY_FONT_SIZE, "Font Size"),
-		MAKE_STRING(HOME_MENU_SETTINGS_PERFORMANCE_OVERLAY_OPACITY, "Opacity"),
-		MAKE_STRING(HOME_MENU_SETTINGS_DEBUG, "Debug"),
-		MAKE_STRING(HOME_MENU_SETTINGS_DEBUG_OVERLAY, "Debug Overlay"),
-		MAKE_STRING(HOME_MENU_SETTINGS_DEBUG_INPUT_OVERLAY, "Input Debug Overlay"),
-		MAKE_STRING(HOME_MENU_SETTINGS_DEBUG_DISABLE_VIDEO_OUTPUT, "Disable Video Output"),
-		MAKE_STRING(HOME_MENU_SETTINGS_DEBUG_TEXTURE_LOD_BIAS, "Texture LOD Bias Addend"),
-		MAKE_STRING(HOME_MENU_SCREENSHOT, "Take Screenshot"),
-		MAKE_STRING(HOME_MENU_SAVESTATE, "SaveState"),
-		MAKE_STRING(HOME_MENU_SAVESTATE_SAVE, "Save Emulation State"),
-		MAKE_STRING(HOME_MENU_SAVESTATE_AND_EXIT, "Save Emulation State And Exit"),
-		MAKE_STRING(HOME_MENU_RELOAD_SAVESTATE, "Reload Last Emulation State"),
-		MAKE_STRING(HOME_MENU_RECORDING, "Start/Stop Recording"),
-		MAKE_STRING(HOME_MENU_TROPHIES, "Trophies"),
+    MAKE_STRING(
+        CELL_OSK_DIALOG_BUSY,
+        "The Home Menu can't be opened while the On Screen Keyboard is busy!"),
+    MAKE_STRING(CELL_SAVEDATA_CB_BROKEN, "Error - Save data corrupted"),
+    MAKE_STRING(CELL_SAVEDATA_CB_FAILURE, "Error - Failed to save or load"),
+    MAKE_STRING(CELL_SAVEDATA_CB_NO_DATA, "Error - Save data cannot be found"),
+    MAKE_STRING(CELL_SAVEDATA_NO_DATA, "There is no saved data."),
+    MAKE_STRING(CELL_SAVEDATA_NEW_SAVED_DATA_TITLE, "New Saved Data"),
+    MAKE_STRING(CELL_SAVEDATA_NEW_SAVED_DATA_SUB_TITLE,
+                "Select to create a new entry"),
+    MAKE_STRING(CELL_SAVEDATA_SAVE_CONFIRMATION,
+                "Do you want to save this data?"),
+    MAKE_STRING(CELL_SAVEDATA_AUTOSAVE, "Saving..."),
+    MAKE_STRING(CELL_SAVEDATA_AUTOLOAD, "Loading..."),
+    MAKE_STRING(
+        CELL_CROSS_CONTROLLER_FW_MSG,
+        "If your system software version on the PS Vita system is earlier than "
+        "1.80, you must update the system software to the latest version."),
+    MAKE_STRING(CELL_NP_RECVMESSAGE_DIALOG_TITLE, "Select Message"),
+    MAKE_STRING(CELL_NP_RECVMESSAGE_DIALOG_TITLE_INVITE, "Select Invite"),
+    MAKE_STRING(CELL_NP_RECVMESSAGE_DIALOG_TITLE_ADD_FRIEND, "Add Friend"),
+    MAKE_STRING(CELL_NP_RECVMESSAGE_DIALOG_FROM, "From:"),
+    MAKE_STRING(CELL_NP_RECVMESSAGE_DIALOG_SUBJECT, "Subject:"),
+    MAKE_STRING(CELL_NP_SENDMESSAGE_DIALOG_TITLE, "Select Message To Send"),
+    MAKE_STRING(CELL_NP_SENDMESSAGE_DIALOG_TITLE_INVITE, "Send Invite"),
+    MAKE_STRING(CELL_NP_SENDMESSAGE_DIALOG_TITLE_ADD_FRIEND, "Add Friend"),
+    MAKE_STRING(RECORDING_ABORTED, "Recording aborted!"),
+    MAKE_STRING(RPCN_NO_ERROR, "RPCN: No Error"),
+    MAKE_STRING(RPCN_ERROR_INVALID_INPUT,
+                "RPCN: Invalid Input (Wrong Host/Port)"),
+    MAKE_STRING(RPCN_ERROR_WOLFSSL, "RPCN Connection Error: WolfSSL Error"),
+    MAKE_STRING(RPCN_ERROR_RESOLVE, "RPCN Connection Error: Resolve Error"),
+    MAKE_STRING(RPCN_ERROR_CONNECT, "RPCN Connection Error"),
+    MAKE_STRING(RPCN_ERROR_LOGIN_ERROR,
+                "RPCN Login Error: Identification Error"),
+    MAKE_STRING(RPCN_ERROR_ALREADY_LOGGED,
+                "RPCN Login Error: User Already Logged In"),
+    MAKE_STRING(RPCN_ERROR_INVALID_LOGIN, "RPCN Login Error: Invalid Username"),
+    MAKE_STRING(RPCN_ERROR_INVALID_PASSWORD,
+                "RPCN Login Error: Invalid Password"),
+    MAKE_STRING(RPCN_ERROR_INVALID_TOKEN, "RPCN Login Error: Invalid Token"),
+    MAKE_STRING(RPCN_ERROR_INVALID_PROTOCOL_VERSION,
+                "RPCN Misc Error: Protocol Version Error (outdated RPCS3?)"),
+    MAKE_STRING(RPCN_ERROR_UNKNOWN, "RPCN: Unknown Error"),
+    MAKE_STRING(RPCN_SUCCESS_LOGGED_ON, "Successfully logged on RPCN!"),
+    MAKE_STRING(HOME_MENU_TITLE, "Home Menu"),
+    MAKE_STRING(HOME_MENU_EXIT_GAME, "Exit Game"),
+    MAKE_STRING(HOME_MENU_RESUME, "Resume Game"),
+    MAKE_STRING(HOME_MENU_FRIENDS, "Friends"),
+    MAKE_STRING(HOME_MENU_FRIENDS_REQUESTS, "Pending Friend Requests"),
+    MAKE_STRING(HOME_MENU_FRIENDS_BLOCKED, "Blocked Users"),
+    MAKE_STRING(HOME_MENU_FRIENDS_STATUS_ONLINE, "Online"),
+    MAKE_STRING(HOME_MENU_FRIENDS_STATUS_OFFLINE, "Offline"),
+    MAKE_STRING(HOME_MENU_FRIENDS_STATUS_BLOCKED, "Blocked"),
+    MAKE_STRING(HOME_MENU_FRIENDS_REQUEST_SENT, "You sent a friend request"),
+    MAKE_STRING(HOME_MENU_FRIENDS_REQUEST_RECEIVED,
+                "Sent you a friend request"),
+    MAKE_STRING(HOME_MENU_FRIENDS_REJECT_REQUEST, "Reject Request"),
+    MAKE_STRING(HOME_MENU_FRIENDS_NEXT_LIST, "Next list"),
+    MAKE_STRING(HOME_MENU_RESTART, "Restart Game"),
+    MAKE_STRING(HOME_MENU_SETTINGS, "Settings"),
+    MAKE_STRING(HOME_MENU_SETTINGS_SAVE, "Save custom configuration?"),
+    MAKE_STRING(HOME_MENU_SETTINGS_SAVE_BUTTON, "Save"),
+    MAKE_STRING(HOME_MENU_SETTINGS_DISCARD,
+                "Discard the current settings' changes?"),
+    MAKE_STRING(HOME_MENU_SETTINGS_DISCARD_BUTTON, "Discard"),
+    MAKE_STRING(HOME_MENU_SETTINGS_AUDIO, "Audio"),
+    MAKE_STRING(HOME_MENU_SETTINGS_AUDIO_MASTER_VOLUME, "Master Volume"),
+    MAKE_STRING(HOME_MENU_SETTINGS_AUDIO_BACKEND, "Audio Backend"),
+    MAKE_STRING(HOME_MENU_SETTINGS_AUDIO_BUFFERING, "Enable Buffering"),
+    MAKE_STRING(HOME_MENU_SETTINGS_AUDIO_BUFFER_DURATION,
+                "Desired Audio Buffer Duration"),
+    MAKE_STRING(HOME_MENU_SETTINGS_AUDIO_TIME_STRETCHING,
+                "Enable Time Stretching"),
+    MAKE_STRING(HOME_MENU_SETTINGS_AUDIO_TIME_STRETCHING_THRESHOLD,
+                "Time Stretching Threshold"),
+    MAKE_STRING(HOME_MENU_SETTINGS_VIDEO, "Video"),
+    MAKE_STRING(HOME_MENU_SETTINGS_VIDEO_FRAME_LIMIT, "Frame Limit"),
+    MAKE_STRING(HOME_MENU_SETTINGS_VIDEO_ANISOTROPIC_OVERRIDE,
+                "Anisotropic Filter Override"),
+    MAKE_STRING(HOME_MENU_SETTINGS_VIDEO_OUTPUT_SCALING, "Output Scaling"),
+    MAKE_STRING(HOME_MENU_SETTINGS_VIDEO_RCAS_SHARPENING,
+                "FidelityFX CAS Sharpening Intensity"),
+    MAKE_STRING(HOME_MENU_SETTINGS_VIDEO_STRETCH_TO_DISPLAY,
+                "Stretch To Display Area"),
+    MAKE_STRING(HOME_MENU_SETTINGS_INPUT, "Input"),
+    MAKE_STRING(HOME_MENU_SETTINGS_INPUT_BACKGROUND_INPUT,
+                "Background Input Enabled"),
+    MAKE_STRING(HOME_MENU_SETTINGS_INPUT_KEEP_PADS_CONNECTED,
+                "Keep Pads Connected"),
+    MAKE_STRING(HOME_MENU_SETTINGS_INPUT_SHOW_PS_MOVE_CURSOR,
+                "Show PS Move Cursor"),
+    MAKE_STRING(HOME_MENU_SETTINGS_INPUT_CAMERA_FLIP, "Camera Flip"),
+    MAKE_STRING(HOME_MENU_SETTINGS_INPUT_PAD_MODE, "Pad Handler Mode"),
+    MAKE_STRING(HOME_MENU_SETTINGS_INPUT_PAD_SLEEP, "Pad Handler Sleep"),
+    MAKE_STRING(HOME_MENU_SETTINGS_INPUT_FAKE_MOVE_ROTATION_CONE_H,
+                "Fake PS Move Rotation Cone (Horizontal)"),
+    MAKE_STRING(HOME_MENU_SETTINGS_INPUT_FAKE_MOVE_ROTATION_CONE_V,
+                "Fake PS Move Rotation Cone (Vertical)"),
+    MAKE_STRING(HOME_MENU_SETTINGS_ADVANCED, "Advanced"),
+    MAKE_STRING(HOME_MENU_SETTINGS_ADVANCED_PREFERRED_SPU_THREADS,
+                "Preferred SPU Threads"),
+    MAKE_STRING(HOME_MENU_SETTINGS_ADVANCED_MAX_CPU_PREEMPTIONS,
+                "Max Power Saving CPU-Preemptions"),
+    MAKE_STRING(HOME_MENU_SETTINGS_ADVANCED_ACCURATE_RSX_RESERVATION_ACCESS,
+                "Accurate RSX reservation access"),
+    MAKE_STRING(HOME_MENU_SETTINGS_ADVANCED_SLEEP_TIMERS_ACCURACY,
+                "Sleep Timers Accuracy"),
+    MAKE_STRING(HOME_MENU_SETTINGS_ADVANCED_MAX_SPURS_THREADS,
+                "Max SPURS Threads"),
+    MAKE_STRING(HOME_MENU_SETTINGS_ADVANCED_DRIVER_WAKE_UP_DELAY,
+                "Driver Wake-Up Delay"),
+    MAKE_STRING(HOME_MENU_SETTINGS_ADVANCED_VBLANK_FREQUENCY,
+                "VBlank Frequency"),
+    MAKE_STRING(HOME_MENU_SETTINGS_ADVANCED_VBLANK_NTSC, "VBlank NTSC Fixup"),
+    MAKE_STRING(HOME_MENU_SETTINGS_OVERLAYS, "Overlays"),
+    MAKE_STRING(HOME_MENU_SETTINGS_OVERLAYS_SHOW_TROPHY_POPUPS,
+                "Show Trophy Popups"),
+    MAKE_STRING(HOME_MENU_SETTINGS_OVERLAYS_SHOW_RPCN_POPUPS,
+                "Show RPCN Popups"),
+    MAKE_STRING(HOME_MENU_SETTINGS_OVERLAYS_SHOW_SHADER_COMPILATION_HINT,
+                "Show Shader Compilation Hint"),
+    MAKE_STRING(HOME_MENU_SETTINGS_OVERLAYS_SHOW_PPU_COMPILATION_HINT,
+                "Show PPU Compilation Hint"),
+    MAKE_STRING(HOME_MENU_SETTINGS_OVERLAYS_SHOW_AUTO_SAVE_LOAD_HINT,
+                "Show Autosave/Autoload Hint"),
+    MAKE_STRING(HOME_MENU_SETTINGS_OVERLAYS_SHOW_PRESSURE_INTENSITY_TOGGLE_HINT,
+                "Show Pressure Intensity Toggle Hint"),
+    MAKE_STRING(HOME_MENU_SETTINGS_OVERLAYS_SHOW_ANALOG_LIMITER_TOGGLE_HINT,
+                "Show Analog Limiter Toggle Hint"),
+    MAKE_STRING(HOME_MENU_SETTINGS_OVERLAYS_SHOW_MOUSE_AND_KB_TOGGLE_HINT,
+                "Show Mouse And Keyboard Toggle Hint"),
+    MAKE_STRING(HOME_MENU_SETTINGS_PERFORMANCE_OVERLAY, "Performance Overlay"),
+    MAKE_STRING(HOME_MENU_SETTINGS_PERFORMANCE_OVERLAY_ENABLE,
+                "Enable Performance Overlay"),
+    MAKE_STRING(HOME_MENU_SETTINGS_PERFORMANCE_OVERLAY_ENABLE_FRAMERATE_GRAPH,
+                "Enable Framerate Graph"),
+    MAKE_STRING(HOME_MENU_SETTINGS_PERFORMANCE_OVERLAY_ENABLE_FRAMETIME_GRAPH,
+                "Enable Frametime Graph"),
+    MAKE_STRING(HOME_MENU_SETTINGS_PERFORMANCE_OVERLAY_DETAIL_LEVEL,
+                "Detail level"),
+    MAKE_STRING(HOME_MENU_SETTINGS_PERFORMANCE_OVERLAY_FRAMERATE_DETAIL_LEVEL,
+                "Framerate Graph Detail Level"),
+    MAKE_STRING(HOME_MENU_SETTINGS_PERFORMANCE_OVERLAY_FRAMETIME_DETAIL_LEVEL,
+                "Frametime Graph Detail Level"),
+    MAKE_STRING(
+        HOME_MENU_SETTINGS_PERFORMANCE_OVERLAY_FRAMERATE_DATAPOINT_COUNT,
+        "Framerate Datapoints"),
+    MAKE_STRING(
+        HOME_MENU_SETTINGS_PERFORMANCE_OVERLAY_FRAMETIME_DATAPOINT_COUNT,
+        "Frametime Datapoints"),
+    MAKE_STRING(HOME_MENU_SETTINGS_PERFORMANCE_OVERLAY_UPDATE_INTERVAL,
+                "Metrics Update Interval"),
+    MAKE_STRING(HOME_MENU_SETTINGS_PERFORMANCE_OVERLAY_POSITION, "Position"),
+    MAKE_STRING(HOME_MENU_SETTINGS_PERFORMANCE_OVERLAY_CENTER_X,
+                "Center Horizontally"),
+    MAKE_STRING(HOME_MENU_SETTINGS_PERFORMANCE_OVERLAY_CENTER_Y,
+                "Center Vertically"),
+    MAKE_STRING(HOME_MENU_SETTINGS_PERFORMANCE_OVERLAY_MARGIN_X,
+                "Horizontal Margin"),
+    MAKE_STRING(HOME_MENU_SETTINGS_PERFORMANCE_OVERLAY_MARGIN_Y,
+                "Vertical Margin"),
+    MAKE_STRING(HOME_MENU_SETTINGS_PERFORMANCE_OVERLAY_FONT_SIZE, "Font Size"),
+    MAKE_STRING(HOME_MENU_SETTINGS_PERFORMANCE_OVERLAY_OPACITY, "Opacity"),
+    MAKE_STRING(HOME_MENU_SETTINGS_DEBUG, "Debug"),
+    MAKE_STRING(HOME_MENU_SETTINGS_DEBUG_OVERLAY, "Debug Overlay"),
+    MAKE_STRING(HOME_MENU_SETTINGS_DEBUG_INPUT_OVERLAY, "Input Debug Overlay"),
+    MAKE_STRING(HOME_MENU_SETTINGS_DEBUG_DISABLE_VIDEO_OUTPUT,
+                "Disable Video Output"),
+    MAKE_STRING(HOME_MENU_SETTINGS_DEBUG_TEXTURE_LOD_BIAS,
+                "Texture LOD Bias Addend"),
+    MAKE_STRING(HOME_MENU_SCREENSHOT, "Take Screenshot"),
+    MAKE_STRING(HOME_MENU_SAVESTATE, "SaveState"),
+    MAKE_STRING(HOME_MENU_SAVESTATE_SAVE, "Save Emulation State"),
+    MAKE_STRING(HOME_MENU_SAVESTATE_AND_EXIT, "Save Emulation State And Exit"),
+    MAKE_STRING(HOME_MENU_RELOAD_SAVESTATE, "Reload Last Emulation State"),
+    MAKE_STRING(HOME_MENU_RECORDING, "Start/Stop Recording"),
+    MAKE_STRING(HOME_MENU_TROPHIES, "Trophies"),
     MAKE_STRING(HOME_MENU_TROPHY_HIDDEN_TITLE, "Hidden trophy"),
-		MAKE_STRING(HOME_MENU_TROPHY_HIDDEN_DESCRIPTION, "This trophy is hidden"),
-		MAKE_STRING(HOME_MENU_TROPHY_PLATINUM_RELEVANT, "Platinum relevant"),
-		MAKE_STRING(HOME_MENU_TROPHY_GRADE_BRONZE, "Bronze"),
-		MAKE_STRING(HOME_MENU_TROPHY_GRADE_SILVER, "Silver"),
-		MAKE_STRING(HOME_MENU_TROPHY_GRADE_GOLD, "Gold"),
-		MAKE_STRING(HOME_MENU_TROPHY_GRADE_PLATINUM, "Platinum"),
-		MAKE_STRING(AUDIO_MUTED, "Audio muted"),
-		MAKE_STRING(AUDIO_UNMUTED, "Audio unmuted"),
-		MAKE_STRING(PROGRESS_DIALOG_PROGRESS, "Progress:"),
-		MAKE_STRING(PROGRESS_DIALOG_PROGRESS_ANALYZING, "Progress: analyzing..."),
-		MAKE_STRING(PROGRESS_DIALOG_REMAINING, "remaining"),
-		MAKE_STRING(PROGRESS_DIALOG_DONE, "done"),
-		MAKE_STRING(PROGRESS_DIALOG_FILE, "file"),
-		MAKE_STRING(PROGRESS_DIALOG_MODULE, "module"),
-		MAKE_STRING(PROGRESS_DIALOG_OF, "of"),
-		MAKE_STRING(PROGRESS_DIALOG_PLEASE_WAIT, "Please wait"),
-		MAKE_STRING(PROGRESS_DIALOG_STOPPING_PLEASE_WAIT, "Stopping. Please wait..."),
-		MAKE_STRING(PROGRESS_DIALOG_SAVESTATE_PLEASE_WAIT, "Creating savestate. Please wait..."),
-		MAKE_STRING(PROGRESS_DIALOG_SCANNING_PPU_EXECUTABLE, "Scanning PPU Executable..."),
-		MAKE_STRING(PROGRESS_DIALOG_ANALYZING_PPU_EXECUTABLE, "Analyzing PPU Executable..."),
-		MAKE_STRING(PROGRESS_DIALOG_SCANNING_PPU_MODULES, "Scanning PPU Modules..."),
-		MAKE_STRING(PROGRESS_DIALOG_LOADING_PPU_MODULES, "Loading PPU Modules..."),
-		MAKE_STRING(PROGRESS_DIALOG_COMPILING_PPU_MODULES, "Compiling PPU Modules..."),
-		MAKE_STRING(PROGRESS_DIALOG_LINKING_PPU_MODULES, "Linking PPU Modules..."),
-		MAKE_STRING(PROGRESS_DIALOG_APPLYING_PPU_CODE, "Applying PPU Code..."),
-		MAKE_STRING(PROGRESS_DIALOG_BUILDING_SPU_CACHE, "Building SPU Cache..."),
-		MAKE_STRING(EMULATION_PAUSED_RESUME_WITH_START, "Press and hold the START button to resume"),
-		MAKE_STRING(EMULATION_RESUMING, "Resuming...!"),
-		MAKE_STRING(EMULATION_FROZEN, "The PS3 application has likely crashed, you can close it."),
-		MAKE_STRING(SAVESTATE_FAILED_DUE_TO_SAVEDATA, "SaveState failed: Game saving is in progress, wait until finished."),
-		MAKE_STRING(SAVESTATE_FAILED_DUE_TO_VDEC, "SaveState failed: VDEC-base video/cutscenes are in order, wait for them to end or enable libvdec.sprx."),
-		MAKE_STRING(SAVESTATE_FAILED_DUE_TO_MISSING_SPU_SETTING, "SaveState failed: Failed to lock SPU state, enabling SPU-Compatible mode may fix it."),
-		MAKE_STRING(SAVESTATE_FAILED_DUE_TO_SPU, "SaveState failed: Failed to lock SPU state, using SPU ASMJIT will fix it."),
-		MAKE_STRING(INVALID, "Invalid"),
+    MAKE_STRING(HOME_MENU_TROPHY_HIDDEN_DESCRIPTION, "This trophy is hidden"),
+    MAKE_STRING(HOME_MENU_TROPHY_PLATINUM_RELEVANT, "Platinum relevant"),
+    MAKE_STRING(HOME_MENU_TROPHY_GRADE_BRONZE, "Bronze"),
+    MAKE_STRING(HOME_MENU_TROPHY_GRADE_SILVER, "Silver"),
+    MAKE_STRING(HOME_MENU_TROPHY_GRADE_GOLD, "Gold"),
+    MAKE_STRING(HOME_MENU_TROPHY_GRADE_PLATINUM, "Platinum"),
+    MAKE_STRING(AUDIO_MUTED, "Audio muted"),
+    MAKE_STRING(AUDIO_UNMUTED, "Audio unmuted"),
+    MAKE_STRING(PROGRESS_DIALOG_PROGRESS, "Progress:"),
+    MAKE_STRING(PROGRESS_DIALOG_PROGRESS_ANALYZING, "Progress: analyzing..."),
+    MAKE_STRING(PROGRESS_DIALOG_REMAINING, "remaining"),
+    MAKE_STRING(PROGRESS_DIALOG_DONE, "done"),
+    MAKE_STRING(PROGRESS_DIALOG_FILE, "file"),
+    MAKE_STRING(PROGRESS_DIALOG_MODULE, "module"),
+    MAKE_STRING(PROGRESS_DIALOG_OF, "of"),
+    MAKE_STRING(PROGRESS_DIALOG_PLEASE_WAIT, "Please wait"),
+    MAKE_STRING(PROGRESS_DIALOG_STOPPING_PLEASE_WAIT,
+                "Stopping. Please wait..."),
+    MAKE_STRING(PROGRESS_DIALOG_SAVESTATE_PLEASE_WAIT,
+                "Creating savestate. Please wait..."),
+    MAKE_STRING(PROGRESS_DIALOG_SCANNING_PPU_EXECUTABLE,
+                "Scanning PPU Executable..."),
+    MAKE_STRING(PROGRESS_DIALOG_ANALYZING_PPU_EXECUTABLE,
+                "Analyzing PPU Executable..."),
+    MAKE_STRING(PROGRESS_DIALOG_SCANNING_PPU_MODULES,
+                "Scanning PPU Modules..."),
+    MAKE_STRING(PROGRESS_DIALOG_LOADING_PPU_MODULES, "Loading PPU Modules..."),
+    MAKE_STRING(PROGRESS_DIALOG_COMPILING_PPU_MODULES,
+                "Compiling PPU Modules..."),
+    MAKE_STRING(PROGRESS_DIALOG_LINKING_PPU_MODULES, "Linking PPU Modules..."),
+    MAKE_STRING(PROGRESS_DIALOG_APPLYING_PPU_CODE, "Applying PPU Code..."),
+    MAKE_STRING(PROGRESS_DIALOG_BUILDING_SPU_CACHE, "Building SPU Cache..."),
+    MAKE_STRING(EMULATION_PAUSED_RESUME_WITH_START,
+                "Press and hold the START button to resume"),
+    MAKE_STRING(EMULATION_RESUMING, "Resuming...!"),
+    MAKE_STRING(EMULATION_FROZEN,
+                "The PS3 application has likely crashed, you can close it."),
+    MAKE_STRING(
+        SAVESTATE_FAILED_DUE_TO_SAVEDATA,
+        "SaveState failed: Game saving is in progress, wait until finished."),
+    MAKE_STRING(SAVESTATE_FAILED_DUE_TO_VDEC,
+                "SaveState failed: VDEC-base video/cutscenes are in order, "
+                "wait for them to end or enable libvdec.sprx."),
+    MAKE_STRING(SAVESTATE_FAILED_DUE_TO_MISSING_SPU_SETTING,
+                "SaveState failed: Failed to lock SPU state, enabling "
+                "SPU-Compatible mode may fix it."),
+    MAKE_STRING(SAVESTATE_FAILED_DUE_TO_SPU,
+                "SaveState failed: Failed to lock SPU state, using SPU ASMJIT "
+                "will fix it."),
+    MAKE_STRING(INVALID, "Invalid"),
+};
+
+class Progress {
+  JNIEnv *env;
+  jlong progressId;
+  jclass gameRepositoryClass;
+  jmethodID onProgressEventMethodId;
+
+public:
+  Progress(JNIEnv *env, jlong progressId) : env(env), progressId(progressId) {
+    gameRepositoryClass =
+        ensure(env->FindClass("net/rpcs3/ProgressRepository"));
+    onProgressEventMethodId = env->GetStaticMethodID(
+        gameRepositoryClass, "onProgressEvent", "(JJJLjava/lang/String;)Z");
+  }
+
+  bool report(jlong value, jlong max, const std::string &message = {}) {
+    return env->CallStaticBooleanMethod(
+        gameRepositoryClass, onProgressEventMethodId, progressId, value, max,
+        message.empty() ? nullptr : wrap(env, message));
+  }
+
+  void failure(const std::string &message = {}) { report(-1, 0, message); }
+
+  void success(jlong value, const std::string &message = {}) {
+    value = std::max<jlong>(value, 1);
+    report(value, value, message);
+  }
+};
+
+struct GameInfo {
+  std::string path;
+  std::string name;
+  std::string iconPath;
 };
 
 static void setupCallbacks() {
@@ -430,8 +547,7 @@ static void setupCallbacks() {
             Emulator::SaveSettings(g_cfg.to_string(), Emu.GetTitleID());
           },
       .close_gs_frame = [](auto...) {},
-      .get_gs_frame =
-          [] { return std::make_unique<GraphicsFrame>(g_native_window); },
+      .get_gs_frame = [] { return std::make_unique<GraphicsFrame>(); },
       .get_camera_handler =
           [](auto...) { return std::make_shared<null_camera_handler>(); },
       .get_music_handler =
@@ -498,18 +614,13 @@ static void setupCallbacks() {
   });
 }
 
-extern "C" JNIEXPORT jboolean JNICALL Java_net_rpcs3_RPCS3_initialize(
-    JNIEnv *env, jobject, jstring apkDir, jstring dataDir, jstring storageDir,
-    jstring externalStorageDir, jstring rootDir) {
-  auto apkDirStr = fix_dir_path(unwrap(env, apkDir));
-  auto dataDirStr = fix_dir_path(unwrap(env, dataDir));
-  auto storageDirStr = fix_dir_path(unwrap(env, storageDir));
-  auto externalStorageDirStr = fix_dir_path(unwrap(env, externalStorageDir));
+extern "C" JNIEXPORT jboolean JNICALL
+Java_net_rpcs3_RPCS3_initialize(JNIEnv *env, jobject, jstring rootDir) {
   auto rootDirStr = fix_dir_path(unwrap(env, rootDir));
 
-  g_android_executable_dir = apkDirStr;
-  g_android_config_dir = apkDirStr + "config/";
-  g_android_cache_dir = apkDirStr + "cache/";
+  g_android_executable_dir = rootDirStr;
+  g_android_config_dir = rootDirStr + "config/";
+  g_android_cache_dir = rootDirStr + "cache/";
 
   if (!g_initialized) {
     g_initialized = true;
@@ -574,6 +685,158 @@ extern "C" JNIEXPORT jboolean JNICALL Java_net_rpcs3_RPCS3_initialize(
   return true;
 }
 
+static void sendFirmwareInstalled(JNIEnv *env, std::string version) {
+  auto fwRepositoryClass = ensure(env->FindClass("net/rpcs3/FirmwareRepository"));
+  auto methodId = ensure(env->GetStaticMethodID(
+    fwRepositoryClass, "onFirmwareInstalled", "(Ljava/lang/String;)V"));
+  
+  env->CallStaticVoidMethod(fwRepositoryClass, methodId, wrap(env, version));
+}
+
+static void sendFirmwareCompiled(JNIEnv *env, std::string version) {
+  auto fwRepositoryClass = ensure(env->FindClass("net/rpcs3/FirmwareRepository"));
+  auto methodId = ensure(env->GetStaticMethodID(
+    fwRepositoryClass, "onFirmwareCompiled", "(Ljava/lang/String;)V"));
+  
+  env->CallStaticVoidMethod(fwRepositoryClass, methodId, wrap(env, version));
+}
+
+static void sendGameInfo(JNIEnv *env, jlong progressId,
+                         std::span<const GameInfo> infos) {
+  auto gameRepositoryClass = ensure(env->FindClass("net/rpcs3/GameRepository"));
+  auto addMethodId = ensure(env->GetStaticMethodID(
+      gameRepositoryClass, "add", "([Lnet/rpcs3/GameInfo;J)V"));
+  auto gameClass = ensure(env->FindClass("net/rpcs3/GameInfo"));
+
+  jmethodID gameConstructor = ensure(env->GetMethodID(
+      gameClass, "<init>",
+      "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V"));
+
+  std::vector<jobject> objects;
+  objects.reserve(infos.size());
+
+  for (const auto &info : infos) {
+    objects.push_back(env->NewObject(gameClass, gameConstructor,
+                                     wrap(env, info.path), wrap(env, info.name),
+                                     wrap(env, info.iconPath), nullptr));
+  }
+
+  auto result = env->NewObjectArray(objects.size(), gameClass, nullptr);
+
+  for (std::size_t i = 0; i < objects.size(); ++i) {
+    env->SetObjectArrayElement(result, i, objects[i]);
+  }
+
+  env->CallStaticVoidMethod(gameRepositoryClass, addMethodId, result,
+                            progressId);
+}
+
+static void collectGamePaths(std::vector<std::string> &paths,
+                             const std::string &rootDir) {
+  std::error_code ec;
+  for (auto entry :
+       std::filesystem::recursive_directory_iterator(rootDir, ec)) {
+    if (!entry.is_directory()) {
+      continue;
+    }
+
+    if (std::filesystem::is_regular_file(entry.path() / "PARAM.SFO")) {
+      paths.push_back(entry.path().string());
+      continue;
+    }
+  }
+}
+
+static std::optional<GameInfo> parsePsf(std::string path,
+                                        const psf::registry &psf) {
+  auto title_id = psf::get_string(psf, "TITLE_ID");
+  auto name = psf::get_string(psf, "TITLE");
+  auto app_ver = psf::get_string(psf, "APP_VER");
+  auto version = psf::get_string(psf, "VERSION");
+  auto category = psf::get_string(psf, "CATEGORY");
+  auto fw = psf::get_string(psf, "PS3_SYSTEM_VER");
+  auto parental_lvl = psf::get_integer(psf, "PARENTAL_LEVEL", 0);
+  auto resolution = psf::get_integer(psf, "RESOLUTION", 0);
+  auto sound_format = psf::get_integer(psf, "SOUND_FORMAT", 0);
+  auto bootable = psf::get_integer(psf, "BOOTABLE", 0);
+  auto attr = psf::get_integer(psf, "ATTRIBUTE", 0);
+  
+  if (!bootable || title_id.empty()) {
+    return {};
+  }
+
+  if (path.empty()) {
+    path = rpcs3::utils::get_hdd0_dir() + "game/" + std::string(title_id) + "/";
+  }
+
+  auto icon_path = path + "/ICON0.PNG";
+  auto movie_path = path + "/ICON1.PAM";
+  return GameInfo{
+      .path = path,
+      .name = std::string(name),
+      .iconPath = icon_path,
+  };
+}
+
+static void collectGameInfo(JNIEnv *env, jlong progressId,
+                            std::vector<std::string> rootDirs) {
+  std::vector<std::string> paths;
+  for (auto &&rootDir : rootDirs) {
+    collectGamePaths(paths, rootDir);
+
+    rpcs3_android.notice("collectGameInfo: processed %s", rootDir);
+  }
+
+  rpcs3_android.notice("collectGameInfo: found %d paths", paths.size());
+
+  Progress progress(env, progressId);
+  progress.report(0, paths.size());
+
+  std::vector<GameInfo> gameInfos;
+  gameInfos.reserve(10);
+  std::size_t processed = 0;
+
+  auto submit = [&] {
+    if (gameInfos.empty()) {
+      return;
+    }
+
+    sendGameInfo(env, progressId, gameInfos);
+    progress.report(processed, paths.size());
+    gameInfos.clear();
+  };
+
+  for (auto &&path : paths) {
+    processed++;
+
+    if (!std::filesystem::is_regular_file(path + "/PARAM.SFO")) {
+      continue;
+    }
+
+    const auto psf = psf::load_object(path + "/PARAM.SFO");
+
+    rpcs3_android.notice("collectGameInfo: sfo at %s", path);
+
+    if (auto gameInfo = parsePsf(path, psf)) {
+      gameInfos.push_back(std::move(*gameInfo));
+
+      if (gameInfos.size() >= 10) {
+        submit();
+      }
+    }
+  }
+
+  submit();
+  progress.success(paths.size());
+}
+
+extern "C" JNIEXPORT jboolean JNICALL Java_net_rpcs3_RPCS3_collectGameInfo(
+    JNIEnv *env, jobject, jstring jrootDir, jlong progressId) {
+
+  collectGameInfo(env, progressId, {unwrap(env, jrootDir)});
+  return true;
+}
+
 extern "C" JNIEXPORT void JNICALL Java_net_rpcs3_RPCS3_shutdown(JNIEnv *env,
                                                                 jobject) {
   Emu.GracefulShutdown(true, true, false);
@@ -581,272 +844,256 @@ extern "C" JNIEXPORT void JNICALL Java_net_rpcs3_RPCS3_shutdown(JNIEnv *env,
 
 extern "C" JNIEXPORT jboolean JNICALL Java_net_rpcs3_RPCS3_boot(JNIEnv *env,
                                                                 jobject,
-                                                                jobject surface,
                                                                 jstring path) {
-
-  g_native_window = ANativeWindow_fromSurface(env, surface);
-  if (g_native_window == nullptr) {
-    rpcs3_android.fatal("returned native window is null, surface %p", surface);
-    return false;
-  }
   Emu.SetForceBoot(true);
   Emu.BootGame(unwrap(env, path), "", false, cfg_mode::global);
   return true;
 }
 
-extern "C" JNIEXPORT jboolean JNICALL Java_net_rpcs3_RPCS3_installFw(
-    JNIEnv *env, jobject, jint fd, jobject eventHandler, jlong requestId) {
-  auto eventHandlerClass = env->GetObjectClass(eventHandler);
-  auto progressEventMethodId =
-      env->GetMethodID(eventHandlerClass, "onProgressEvent", "(JJJ)Z");
+extern "C" JNIEXPORT jboolean JNICALL Java_net_rpcs3_RPCS3_surfaceEvent(
+    JNIEnv *env, jobject, jobject surface, jint event) {
+  rpcs3_android.warning("surface event %p, %d", surface, event);
 
-  if (progressEventMethodId == nullptr) {
-    rpcs3_android.fatal("installFw: failed to find onProgressEvent method");
-    return false;
-  }
+  if (event == 2) {
+    auto prevWindow = g_native_window.exchange(nullptr);
+    if (prevWindow != nullptr) {
+      ANativeWindow_release(prevWindow);
+    }
+  } else {
+    auto newWindow = ANativeWindow_fromSurface(env, surface);
 
-  try {
-    if (!env->CallBooleanMethod(eventHandler, progressEventMethodId, requestId,
-                                jlong(0), jlong(0))) {
+    if (newWindow == nullptr) {
+      rpcs3_android.fatal("returned native window is null, surface %p",
+                          surface);
       return false;
     }
-  } catch (...) {
-    return false;
+
+    auto prevWindow = g_native_window.exchange(newWindow);
+    if (prevWindow != nullptr && prevWindow != newWindow) {
+      if (prevWindow != nullptr) {
+        ANativeWindow_release(prevWindow);
+      }
+
+      ANativeWindow_acquire(newWindow);
+    }
   }
-
-  JavaVM *jvm;
-  env->GetJavaVM(&jvm);
-
-  eventHandler = env->NewGlobalRef(eventHandler);
-
-  std::thread([jvm, eventHandler, fd, eventHandlerClass, progressEventMethodId,
-               requestId]() mutable {
-    JNIEnv *env;
-    JavaVMAttachArgs args;
-    args.version = JNI_VERSION_1_6;
-    args.name = "Firmware Install Thread";
-    args.group = nullptr;
-    jvm->AttachCurrentThreadAsDaemon(&env, &args);
-
-    AtExit atExit([=] {
-      env->DeleteGlobalRef(eventHandler);
-      jvm->DetachCurrentThread();
-    });
-
-    auto eventHandlerClass = env->GetObjectClass(eventHandler);
-    auto progressEventMethodId =
-        env->GetMethodID(eventHandlerClass, "onProgressEvent", "(JJJ)Z");
-
-    auto pup_f = fs::file::from_native_handle(fd);
-
-    if (!pup_f) {
-      rpcs3_android.fatal("installFw: failed to open PUP");
-      env->CallBooleanMethod(eventHandler, progressEventMethodId, requestId,
-                             jlong(-1), jlong(0));
-      return;
-    }
-
-    pup_object pup(std::move(pup_f));
-
-    if (static_cast<pup_error>(pup) != pup_error::ok) {
-      rpcs3_android.fatal("installFw: invalid PUP");
-      env->CallBooleanMethod(eventHandler, progressEventMethodId, requestId,
-                             jlong(-1), jlong(0));
-      return;
-    }
-
-    fs::file update_files_f = pup.get_file(0x300);
-
-    const usz update_files_size = update_files_f ? update_files_f.size() : 0;
-
-    if (!update_files_size) {
-      rpcs3_android.fatal("installFw: invalid PUP");
-      env->CallBooleanMethod(eventHandler, progressEventMethodId, requestId,
-                             jlong(-1), jlong(0));
-      return;
-    }
-
-    tar_object update_files(update_files_f);
-
-    auto update_filenames = update_files.get_filenames();
-    update_filenames.erase(std::remove_if(update_filenames.begin(),
-                                          update_filenames.end(),
-                                          [](const std::string &s) {
-                                            return !s.starts_with("dev_flash_");
-                                          }),
-                           update_filenames.end());
-
-    if (update_filenames.empty()) {
-      rpcs3_android.fatal("installFw: invalid PUP");
-      env->CallBooleanMethod(eventHandler, progressEventMethodId, requestId,
-                             jlong(-1), jlong(0));
-      return;
-    }
-
-    std::string version_string;
-
-    if (fs::file version = pup.get_file(0x100)) {
-      version_string = version.to_string();
-    }
-
-    if (const usz version_pos = version_string.find('\n');
-        version_pos != std::string::npos) {
-      version_string.erase(version_pos);
-    }
-
-    if (version_string.empty()) {
-      rpcs3_android.fatal("installFw: invalid PUP");
-      env->CallBooleanMethod(eventHandler, progressEventMethodId, requestId,
-                             jlong(-1), jlong(0));
-      return;
-    }
-
-    jlong progress = 0;
-    for (const auto &update_filename : update_filenames) {
-      auto update_file_stream = update_files.get_file(update_filename);
-
-      if (update_file_stream->m_file_handler) {
-        // Forcefully read all the data
-        update_file_stream->m_file_handler->handle_file_op(
-            *update_file_stream, 0, update_file_stream->get_size(umax),
-            nullptr);
-      }
-
-      fs::file update_file =
-          fs::make_stream(std::move(update_file_stream->data));
-
-      SCEDecrypter self_dec(update_file);
-      self_dec.LoadHeaders();
-      self_dec.LoadMetadata(SCEPKG_ERK, SCEPKG_RIV);
-      self_dec.DecryptData();
-
-      auto dev_flash_tar_f = self_dec.MakeFile();
-
-      if (dev_flash_tar_f.size() < 3) {
-        rpcs3_android.error(
-            "Firmware installation failed: Firmware could not be decompressed");
-
-        env->CallBooleanMethod(eventHandler, progressEventMethodId, requestId,
-                               jlong(-1), jlong(update_filenames.size()));
-        return;
-      }
-
-      tar_object dev_flash_tar(dev_flash_tar_f[2]);
-
-      if (!dev_flash_tar.extract()) {
-
-        rpcs3_android.error("Error while installing firmware: TAR contents are "
-                            "invalid. (package=%s)",
-                            update_filename);
-
-        env->CallBooleanMethod(eventHandler, progressEventMethodId, requestId,
-                               jlong(-1), jlong(update_filenames.size()));
-        return;
-      }
-
-      if (!env->CallBooleanMethod(eventHandler, progressEventMethodId,
-                                  requestId, progress++,
-                                  jlong(update_filenames.size()))) {
-        // Installation was cancelled
-        return;
-      }
-    }
-
-    env->CallBooleanMethod(eventHandler, progressEventMethodId, requestId,
-                           jlong(update_filenames.size()),
-                           jlong(update_filenames.size()));
-  }).detach();
 
   return true;
 }
 
-extern "C" JNIEXPORT jboolean JNICALL Java_net_rpcs3_RPCS3_installPkgFile(
-    JNIEnv *env, jobject, jint fd, jobject eventHandler, jlong requestId) {
-  auto eventHandlerClass = env->GetObjectClass(eventHandler);
-  auto progressEventMethodId =
-      env->GetMethodID(eventHandlerClass, "onProgressEvent", "(JJJ)Z");
-
-  if (progressEventMethodId == nullptr) {
-    rpcs3_android.fatal("installPkg: failed to find onProgressEvent method");
-    return false;
-  }
+extern "C" JNIEXPORT jboolean JNICALL Java_net_rpcs3_RPCS3_installFw(
+    JNIEnv *env, jobject, jint fd, jlong progressId) {
+  Progress progress(env, progressId);
 
   try {
-    if (!env->CallBooleanMethod(eventHandler, progressEventMethodId, requestId,
-                                jlong(0), jlong(0))) {
+    if (!progress.report(0, 0)) {
       return false;
     }
   } catch (...) {
     return false;
   }
 
-  JavaVM *jvm;
-  env->GetJavaVM(&jvm);
+  auto pup_f = fs::file::from_native_handle(fd);
+  AtExit atExit{[&] { pup_f.release_handle(); }};
 
-  eventHandler = env->NewGlobalRef(eventHandler);
+  if (!pup_f) {
+    rpcs3_android.fatal("installFw: failed to open PUP");
+    progress.failure("Failed to open file");
+    return false;
+  }
 
-  std::thread([jvm, eventHandler, fd, eventHandlerClass, progressEventMethodId,
-               requestId]() mutable {
-    JNIEnv *env;
-    JavaVMAttachArgs args;
-    args.version = JNI_VERSION_1_6;
-    args.name = "Pkg Install Thread";
-    args.group = nullptr;
-    jvm->AttachCurrentThreadAsDaemon(&env, &args);
+  pup_object pup(std::move(pup_f));
+  AtExit atExit_pup{[&] { pup.file().release_handle(); }};
 
-    struct AtExit {
-      std::function<void()> cb;
-      ~AtExit() { cb(); }
-    };
+  if (static_cast<pup_error>(pup) == pup_error::hash_mismatch) {
+    rpcs3_android.fatal("installFw: invalid PUP");
+    progress.failure("Selected file is not firmware update file");
+    return false;
+  }
 
-    AtExit atExit([=] {
-      env->DeleteGlobalRef(eventHandler);
-      jvm->DetachCurrentThread();
-    });
+  if (static_cast<pup_error>(pup) != pup_error::ok) {
+    rpcs3_android.fatal("installFw: invalid PUP");
+    progress.failure("Firmware update file is broken");
+    return false;
+  }
 
-    auto eventHandlerClass = env->GetObjectClass(eventHandler);
-    auto progressEventMethodId =
-        env->GetMethodID(eventHandlerClass, "onProgressEvent", "(JJJ)Z");
+  fs::file update_files_f = pup.get_file(0x300);
 
-    std::deque<package_reader> readers;
-    std::deque<std::string> bootable_paths;
-    readers.emplace_back("dummy.pkg", fs::file::from_native_handle(fd));
+  const usz update_files_size = update_files_f ? update_files_f.size() : 0;
 
-    package_install_result result = {};
-    named_thread worker("PKG Installer", [&readers, &result, &bootable_paths] {
-      result = package_reader::extract_data(readers, bootable_paths);
-      return result.error == package_install_result::error_type::no_error;
-    });
+  if (!update_files_size) {
+    rpcs3_android.fatal("installFw: invalid PUP");
+    progress.failure("Firmware update file is broken");
+    return false;
+  }
 
-    const jlong maxProgress = 10000;
+  tar_object update_files(update_files_f);
 
+  auto update_filenames = update_files.get_filenames();
+  update_filenames.erase(std::remove_if(update_filenames.begin(),
+                                        update_filenames.end(),
+                                        [](const std::string &s) {
+                                          return !s.starts_with("dev_flash_");
+                                        }),
+                         update_filenames.end());
+
+  if (update_filenames.empty()) {
+    rpcs3_android.fatal("installFw: invalid PUP");
+    progress.failure("Firmware update file is broken");
+    return false;
+  }
+
+  std::string version_string;
+
+  if (fs::file version = pup.get_file(0x100)) {
+    version_string = version.to_string();
+  }
+
+  if (const usz version_pos = version_string.find('\n');
+      version_pos != std::string::npos) {
+    version_string.erase(version_pos);
+  }
+
+  if (version_string.empty()) {
+    rpcs3_android.fatal("installFw: invalid PUP");
+    progress.failure("Firmware update file is broken");
+    return false;
+  }
+
+  auto dev_flash = g_cfg_vfs.get_dev_flash();
+
+  sendGameInfo(
+    env, progressId,
+    {{GameInfo{
+        .path = dev_flash + "/vsh/module/vsh.self",
+        .name = "VSH",
+        .iconPath = dev_flash + "vsh/resource/explore/icon/icon_home.png",
+    }}});
+
+  jlong processed = 0;
+  for (const auto &update_filename : update_filenames) {
+    auto update_file_stream = update_files.get_file(update_filename);
+
+    if (update_file_stream->m_file_handler) {
+      // Forcefully read all the data
+      update_file_stream->m_file_handler->handle_file_op(
+          *update_file_stream, 0, update_file_stream->get_size(umax), nullptr);
+    }
+
+    fs::file update_file = fs::make_stream(std::move(update_file_stream->data));
+
+    SCEDecrypter self_dec(update_file);
+    self_dec.LoadHeaders();
+    self_dec.LoadMetadata(SCEPKG_ERK, SCEPKG_RIV);
+    self_dec.DecryptData();
+
+    auto dev_flash_tar_f = self_dec.MakeFile();
+
+    if (dev_flash_tar_f.size() < 3) {
+      rpcs3_android.error(
+          "Firmware installation failed: Firmware could not be decompressed");
+
+      progress.failure("Firmware update file could not be decompressed");
+      return false;
+    }
+
+    tar_object dev_flash_tar(dev_flash_tar_f[2]);
+
+    if (!dev_flash_tar.extract()) {
+
+      rpcs3_android.error("Error while installing firmware: TAR contents are "
+                          "invalid. (package=%s)",
+                          update_filename);
+
+      progress.failure(fmt::format("TAR contents are invalid (package=%s)",
+                                   update_filename));
+      return false;
+    }
+
+    if (!progress.report(processed++, update_filenames.size())) {
+      // Installation was cancelled
+      return false;
+    }
+  }
+
+  sendFirmwareInstalled(env, utils::get_firmware_version());
+  progress.success(update_filenames.size());
+  return true;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL Java_net_rpcs3_RPCS3_installPkgFile(
+    JNIEnv *env, jobject, jint fd, jlong requestId) {
+  Progress progress(env, requestId);
+
+  try {
+    if (!progress.report(0, 0)) {
+      return false;
+    }
+  } catch (...) {
+    return false;
+  }
+
+  std::deque<package_reader> readers;
+  std::deque<std::string> bootable_paths;
+  readers.emplace_back("dummy.pkg", fs::file::from_native_handle(fd));
+
+  package_install_result result = {};
+  named_thread worker("PKG Installer", [&readers, &result, &bootable_paths] {
+    result = package_reader::extract_data(readers, bootable_paths);
+    return result.error == package_install_result::error_type::no_error;
+  });
+
+  AtExit atExit{[&] {
+    for (auto &reader : readers) {
+      reader.file().release_handle();
+    }
+  }};
+
+  for (auto &reader : readers) {
+    if (auto gameInfo = parsePsf("", reader.get_psf())) {
+      sendGameInfo(env, requestId, {{ *gameInfo }});
+    }
+  }
+
+  const jlong maxProgress = 10000;
+
+  while (true) {
+    std::uint64_t totalProgress = 0;
     for (std::size_t index = 0; auto &reader : readers) {
-      while (true) {
-        auto progress = reader.get_progress(maxProgress);
-
-        progress += index * maxProgress;
-        progress /= readers.size();
-
-        if (!env->CallBooleanMethod(eventHandler, progressEventMethodId,
-                                    requestId, jlong(progress),
-                                    jlong(maxProgress))) {
-          for (package_reader &reader : readers) {
-            reader.abort_extract();
-          }
-
-          return;
+      if (result.error != package_install_result::error_type::no_error) {
+        progress.failure("Installation failed");
+        for (package_reader &reader : readers) {
+          reader.abort_extract();
         }
-
-        if (progress == maxProgress) {
-          break;
-        }
-
-        std::this_thread::sleep_for(std::chrono::seconds(2));
+        return false;
       }
 
-      ++index;
+      totalProgress += reader.get_progress(maxProgress);
     }
-  }).detach();
+
+    if (totalProgress == maxProgress * readers.size()) {
+      progress.success(maxProgress);
+      break;
+    }
+
+    totalProgress /= readers.size();
+
+    if (!progress.report(totalProgress, maxProgress)) {
+      for (package_reader &reader : readers) {
+        reader.abort_extract();
+      }
+
+      return false;
+    }
+
+    std::this_thread::sleep_for(std::chrono::seconds(2));
+  }
+
+  if (worker()) {
+    std::vector<std::string> paths;
+    collectGameInfo(env, requestId,
+                    std::vector(bootable_paths.begin(), bootable_paths.end()));
+  }
 
   return true;
 }
