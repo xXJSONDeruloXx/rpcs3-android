@@ -859,7 +859,7 @@ extern "C" JNIEXPORT jboolean JNICALL Java_net_rpcs3_RPCS3_surfaceEvent(
     if (prevWindow != nullptr) {
       ANativeWindow_release(prevWindow);
     }
-  } else {
+  } else if (event == 0) {
     auto newWindow = ANativeWindow_fromSurface(env, surface);
 
     if (newWindow == nullptr) {
@@ -869,12 +869,13 @@ extern "C" JNIEXPORT jboolean JNICALL Java_net_rpcs3_RPCS3_surfaceEvent(
     }
 
     auto prevWindow = g_native_window.exchange(newWindow);
-    if (prevWindow != nullptr && prevWindow != newWindow) {
+
+    if (newWindow != prevWindow) {
+      ANativeWindow_acquire(newWindow);
+
       if (prevWindow != nullptr) {
         ANativeWindow_release(prevWindow);
       }
-
-      ANativeWindow_acquire(newWindow);
     }
   }
 
