@@ -66,6 +66,8 @@ struct AtExit {
 
 static bool g_initialized;
 static std::atomic<ANativeWindow *> g_native_window;
+static std::mutex g_android_usb_devices_mutex;
+static std::vector<int> g_android_usb_devices;
 
 extern std::string g_android_executable_dir;
 extern std::string g_android_config_dir;
@@ -919,7 +921,7 @@ Java_net_rpcs3_RPCS3_usbDeviceEvent(JNIEnv *env, jobject, jint fd, jint event) {
   rpcs3_android.warning("usb device event %d, %d", fd, event);
 
   {
-    std::lock_guard lock(g_android_usb_devices_mutex);
+    std::lock_guard<std::mutex> lock(g_android_usb_devices_mutex);
 
     if (event == 0) {
       g_android_usb_devices.push_back(fd);
