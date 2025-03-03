@@ -1,27 +1,39 @@
 package net.rpcs3.ui.games
 
 import android.content.Intent
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.RectangleShape
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
@@ -33,6 +45,7 @@ import net.rpcs3.GameProgressType
 import net.rpcs3.GameRepository
 import net.rpcs3.ProgressRepository
 import net.rpcs3.RPCS3Activity
+import java.io.File
 
 private fun withAlpha(color: Color, alpha: Float): Color {
     return Color(
@@ -43,52 +56,98 @@ private fun withAlpha(color: Color, alpha: Float): Color {
     )
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun GameItem(game: Game) {
     val context = LocalContext.current
+    val menuExpanded = remember { mutableStateOf(false) }
+    val iconExists = remember { mutableStateOf(false) }
+
     Column {
-        Card(onClick = {
-            if (FirmwareRepository.version.value == null) {
-                // TODO: firmware not installed
+        DropdownMenu(expanded = menuExpanded.value, onDismissRequest = { menuExpanded.value = false }) {
+            if (game.progressList.isEmpty()) {
+                DropdownMenuItem(
+                    text = { Text("Delete") },
+                    leadingIcon = { Icon(Icons.Outlined.Delete, contentDescription = null) },
+                    onClick = {
+                        menuExpanded.value = false
+                        val path = File(game.info.path)
+                        if (path.exists()) {
+                            GameRepository.remove(game)
+                            path.deleteRecursively()
+                        }
+
+                        // FIXME: delete cache
+                    }
+                )
             }
-            else if (FirmwareRepository.progressChannel.value != null) {
-                // TODO: firmware in use
-            } else if (game.info.path != "$" && game.findProgress(
-                    arrayOf(
-                        GameProgressType.Install,
-                        GameProgressType.Remove
-                    )
-                ) == null
-            ) {
-                if (game.findProgress(GameProgressType.Compile) != null) {
-                    // TODO: game is compiling
-                } else {
-                    GameRepository.onBoot(game)
-                    val emulatorWindow = Intent(
-                        context,
-                        RPCS3Activity::class.java
-                    )
-                    emulatorWindow.putExtra("path", game.info.path)
-                    context.startActivity(emulatorWindow)
+        }
+
+        Card(shape = RectangleShape, modifier = Modifier.fillMaxSize().combinedClickable(
+            onClick = {
+                if (FirmwareRepository.version.value == null) {
+                    // TODO: firmware not installed
+                }
+                else if (FirmwareRepository.progressChannel.value != null) {
+                    // TODO: firmware in use
+                } else if (game.info.path != "$" && game.findProgress(
+                        arrayOf(
+                            GameProgressType.Install,
+                            GameProgressType.Remove
+                        )
+                    ) == null
+                ) {
+                    if (game.findProgress(GameProgressType.Compile) != null) {
+                        // TODO: game is compiling
+                    } else {
+                        GameRepository.onBoot(game)
+                        val emulatorWindow = Intent(
+                            context,
+                            RPCS3Activity::class.java
+                        )
+                        emulatorWindow.putExtra("path", game.info.path)
+                        context.startActivity(emulatorWindow)
+                    }
+                }
+            },
+            onLongClick = {
+                if (game.info.name.value != "VSH") {
+                    menuExpanded.value = true
                 }
             }
-        }, shape = RectangleShape, modifier = Modifier.fillMaxSize()) {
+        )
+        ) {
+            if (game.info.iconPath.value != null && !iconExists.value) {
+                if (game.progressList.isNotEmpty()) {
+                    val progressId = ProgressRepository.getItem(game.progressList.first().id)
+                    if (progressId != null) {
+                        val progressValue = progressId.value.value
+                        val progressMax =  progressId.value.max
+
+                        iconExists.value = (progressMax.longValue != 0L && progressValue.longValue == progressMax.longValue) || File(game.info.iconPath.value!!).exists()
+                    }
+                } else {
+                    iconExists.value = File(game.info.iconPath.value!!).exists()
+                }
+            }
+
             Box(
                 modifier = Modifier
-                    .height(128.dp)
+                    .height(110.dp)
                     .align(alignment = Alignment.CenterHorizontally)
                     .fillMaxSize()
             ) {
-                val iconPath = game.info.iconPath
-                if (iconPath.value != null) {
+                if (game.info.iconPath.value != null && iconExists.value) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.Center,
                         modifier = Modifier.fillMaxSize()
                     ) {
                         AsyncImage(
-                            model = iconPath.value,
-                            contentDescription = null
+                            model = game.info.iconPath.value,
+                            contentScale = if (game.info.name.value == "VSH") ContentScale.Fit else ContentScale.Crop,
+                            contentDescription = null,
+                            modifier = Modifier.fillMaxWidth().wrapContentHeight()
                         )
                     }
                 }
@@ -154,18 +213,18 @@ fun GameItem(game: Game) {
 @Composable
 fun GamesScreen() {
     val games = remember { GameRepository.list() }
-    val isRefreshing = false
+    val isRefreshing = remember { mutableStateOf(false) }
 
     PullToRefreshBox(
-        isRefreshing = isRefreshing,
-        onRefresh = {},
+        isRefreshing = isRefreshing.value,
+        onRefresh = { isRefreshing.value = false },
     ) {
         LazyVerticalGrid(
-            columns = GridCells.Adaptive(minSize = 128.dp),
+            columns = GridCells.Adaptive(minSize = 320.dp * 0.6f),
             horizontalArrangement = Arrangement.Center,
             modifier = Modifier.fillMaxSize()
         ) {
-            items(games.size) { index ->
+            items(count = games.size, key = { index -> games[index].info.path }) { index ->
                 GameItem(games[index])
             }
         }

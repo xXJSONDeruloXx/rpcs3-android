@@ -8,6 +8,7 @@
 #include "Emu/Io/Null/NullMouseHandler.h"
 #include "Emu/Io/Null/null_camera_handler.h"
 #include "Emu/Io/Null/null_music_handler.h"
+#include "Emu/Io/pad_config_types.h"
 #include "Emu/RSX/Null/NullGSRender.h"
 #include "Emu/RSX/RSXThread.h"
 #include "Emu/RSX/VK/VKGSRender.h"
@@ -16,6 +17,10 @@
 #include "Emu/system_config_types.h"
 #include "Emu/system_utils.hpp"
 #include "Emu/vfs_config.h"
+#include "Input/ds3_pad_handler.h"
+#include "Input/ds4_pad_handler.h"
+#include "Input/dualsense_pad_handler.h"
+#include "Input/hid_pad_handler.h"
 #include "Input/pad_thread.h"
 #include "Loader/PSF.h"
 #include "Loader/PUP.h"
@@ -23,6 +28,8 @@
 #include "Utilities/File.h"
 #include "Utilities/JIT.h"
 #include "Utilities/Thread.h"
+#include "hidapi_libusb.h"
+#include "libusb.h"
 #include "rpcs3_version.h"
 #include "util/asm.hpp"
 #include "util/console.h"
@@ -475,21 +482,21 @@ static std::pair<std::string, std::u32string> g_strings[] = {
 class Progress {
   JNIEnv *env;
   jlong progressId;
-  jclass gameRepositoryClass;
+  jclass progressRepositoryClass;
   jmethodID onProgressEventMethodId;
 
 public:
   Progress(JNIEnv *env, jlong progressId) : env(env), progressId(progressId) {
-    gameRepositoryClass =
+    progressRepositoryClass =
         ensure(env->FindClass("net/rpcs3/ProgressRepository"));
     onProgressEventMethodId = env->GetStaticMethodID(
-        gameRepositoryClass, "onProgressEvent", "(JJJLjava/lang/String;)Z");
+        progressRepositoryClass, "onProgressEvent", "(JJJLjava/lang/String;)Z");
   }
 
   bool report(jlong value, jlong max, const std::string &message = {}) {
     return env->CallStaticBooleanMethod(
-        gameRepositoryClass, onProgressEventMethodId, progressId, value, max,
-        message.empty() ? nullptr : wrap(env, message));
+        progressRepositoryClass, onProgressEventMethodId, progressId, value,
+        max, message.empty() ? nullptr : wrap(env, message));
   }
 
   void failure(const std::string &message = {}) { report(-1, 0, message); }
@@ -605,6 +612,14 @@ static void setupCallbacks() {
       .play_sound = [](auto...) {},
       .get_image_info = [](auto...) { return false; },
       .get_scaled_image = [](auto...) { return false; },
+      .resolve_path =
+          [](std::string_view arg) {
+            std::error_code ec;
+            auto result = std::filesystem::weakly_canonical(
+                              std::filesystem::path(arg), ec)
+                              .string();
+            return ec ? std::string(arg) : result;
+          },
       .get_font_dirs = [](auto...) { return std::vector<std::string>(); },
       .on_install_pkgs = [](auto...) { return false; },
       .add_breakpoint = [](auto...) {},
@@ -621,6 +636,13 @@ Java_net_rpcs3_RPCS3_initialize(JNIEnv *env, jobject, jstring rootDir) {
   g_android_executable_dir = rootDirStr;
   g_android_config_dir = rootDirStr + "config/";
   g_android_cache_dir = rootDirStr + "cache/";
+
+  if (int r = libusb_set_option(nullptr, LIBUSB_OPTION_NO_DEVICE_DISCOVERY,
+                                nullptr);
+      r != 0) {
+    rpcs3_android.warning(
+        "libusb_set_option(LIBUSB_OPTION_NO_DEVICE_DISCOVERY) -> %d", r);
+  }
 
   if (!g_initialized) {
     g_initialized = true;
@@ -668,11 +690,13 @@ Java_net_rpcs3_RPCS3_initialize(JNIEnv *env, jobject, jstring rootDir) {
     Emu.SetHasGui(false);
     Emu.Init();
 
-    g_cfg.video.resolution.set(video_resolution::_480p);
+    // g_cfg_vfs.dev_hdd0.to_string().ends_with("/")
+    g_cfg.video.resolution.set(video_resolution::_720p);
     g_cfg.video.renderer.set(video_renderer::vulkan);
     g_cfg.core.ppu_decoder.set(ppu_decoder_type::llvm);
     g_cfg.core.spu_decoder.set(spu_decoder_type::llvm);
-    g_cfg.core.llvm_cpu.from_string(fallback_cpu_detection());
+    g_cfg.core.llvm_cpu.from_string("");
+    // g_cfg.core.llvm_cpu.from_string(fallback_cpu_detection());
     Emulator::SaveSettings(g_cfg.to_string(), Emu.GetTitleID());
   }
 
@@ -686,18 +710,20 @@ Java_net_rpcs3_RPCS3_initialize(JNIEnv *env, jobject, jstring rootDir) {
 }
 
 static void sendFirmwareInstalled(JNIEnv *env, std::string version) {
-  auto fwRepositoryClass = ensure(env->FindClass("net/rpcs3/FirmwareRepository"));
+  auto fwRepositoryClass =
+      ensure(env->FindClass("net/rpcs3/FirmwareRepository"));
   auto methodId = ensure(env->GetStaticMethodID(
-    fwRepositoryClass, "onFirmwareInstalled", "(Ljava/lang/String;)V"));
-  
+      fwRepositoryClass, "onFirmwareInstalled", "(Ljava/lang/String;)V"));
+
   env->CallStaticVoidMethod(fwRepositoryClass, methodId, wrap(env, version));
 }
 
 static void sendFirmwareCompiled(JNIEnv *env, std::string version) {
-  auto fwRepositoryClass = ensure(env->FindClass("net/rpcs3/FirmwareRepository"));
+  auto fwRepositoryClass =
+      ensure(env->FindClass("net/rpcs3/FirmwareRepository"));
   auto methodId = ensure(env->GetStaticMethodID(
-    fwRepositoryClass, "onFirmwareCompiled", "(Ljava/lang/String;)V"));
-  
+      fwRepositoryClass, "onFirmwareCompiled", "(Ljava/lang/String;)V"));
+
   env->CallStaticVoidMethod(fwRepositoryClass, methodId, wrap(env, version));
 }
 
@@ -760,13 +786,15 @@ static std::optional<GameInfo> parsePsf(std::string path,
   auto sound_format = psf::get_integer(psf, "SOUND_FORMAT", 0);
   auto bootable = psf::get_integer(psf, "BOOTABLE", 0);
   auto attr = psf::get_integer(psf, "ATTRIBUTE", 0);
-  
+
   if (!bootable || title_id.empty()) {
     return {};
   }
 
   if (path.empty()) {
     path = rpcs3::utils::get_hdd0_dir() + "game/" + std::string(title_id) + "/";
+    rpcs3_android.warning("title_id(%s) -> path(%s)", title_id.data(),
+                          path.c_str());
   }
 
   auto icon_path = path + "/ICON0.PNG";
@@ -844,9 +872,13 @@ extern "C" JNIEXPORT void JNICALL Java_net_rpcs3_RPCS3_shutdown(JNIEnv *env,
 
 extern "C" JNIEXPORT jboolean JNICALL Java_net_rpcs3_RPCS3_boot(JNIEnv *env,
                                                                 jobject,
-                                                                jstring path) {
+                                                                jstring jpath) {
   Emu.SetForceBoot(true);
-  Emu.BootGame(unwrap(env, path), "", false, cfg_mode::global);
+  auto path = unwrap(env, jpath);
+  while (path.ends_with('/')) {
+    path.pop_back();
+  }
+  Emu.BootGame(path, "", false, cfg_mode::global);
   return true;
 }
 
@@ -879,6 +911,39 @@ extern "C" JNIEXPORT jboolean JNICALL Java_net_rpcs3_RPCS3_surfaceEvent(
     }
   }
 
+  return true;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_net_rpcs3_RPCS3_usbDeviceEvent(JNIEnv *env, jobject, jint fd, jint event) {
+  rpcs3_android.warning("usb device event %d, %d", fd, event);
+
+  {
+    std::lock_guard lock(g_android_usb_devices_mutex);
+
+    if (event == 0) {
+      g_android_usb_devices.push_back(fd);
+    } else {
+      if (auto it = std::ranges::find(g_android_usb_devices, fd);
+          it != g_android_usb_devices.end()) {
+        g_android_usb_devices.erase(it);
+      }
+    }
+  }
+
+  {
+    auto list = [](auto handler, std::string name) {
+      rpcs3_android.warning("going to enumerate %s pads", name);
+      handler.Init();
+    };
+
+    list(ds3_pad_handler(), "ds3");
+    list(ds4_pad_handler(), "ds4");
+    list(dualsense_pad_handler(), "dualsense");
+  }
+
+  // FIXME
+  g_cfg_input.player1.handler.set(pad_handler::dualsense);
   return true;
 }
 
@@ -964,12 +1029,12 @@ extern "C" JNIEXPORT jboolean JNICALL Java_net_rpcs3_RPCS3_installFw(
   auto dev_flash = g_cfg_vfs.get_dev_flash();
 
   sendGameInfo(
-    env, progressId,
-    {{GameInfo{
-        .path = dev_flash + "/vsh/module/vsh.self",
-        .name = "VSH",
-        .iconPath = dev_flash + "vsh/resource/explore/icon/icon_home.png",
-    }}});
+      env, progressId,
+      {{GameInfo{
+          .path = dev_flash + "/vsh/module/vsh.self",
+          .name = "VSH",
+          .iconPath = dev_flash + "vsh/resource/explore/icon/icon_home.png",
+      }}});
 
   jlong processed = 0;
   for (const auto &update_filename : update_filenames) {
@@ -1052,7 +1117,7 @@ extern "C" JNIEXPORT jboolean JNICALL Java_net_rpcs3_RPCS3_installPkgFile(
 
   for (auto &reader : readers) {
     if (auto gameInfo = parsePsf("", reader.get_psf())) {
-      sendGameInfo(env, requestId, {{ *gameInfo }});
+      sendGameInfo(env, requestId, {{*gameInfo}});
     }
   }
 

@@ -124,6 +124,7 @@ class GameRepository {
                 if (instance.games.first() != game) {
                     instance.games.remove(game)
                     instance.games.add(0, game)
+                    save()
                 }
             }
         }
